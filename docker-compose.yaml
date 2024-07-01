@@ -1,0 +1,520 @@
+version: "2.2"
+
+######################################################
+# COMMONS
+######################################################
+
+x-sparkworker-common: &sparkworker-common
+  restart: on-failure
+  build: ./docker/spark
+  volumes:
+    - ./mnt/spark/work/:/opt/bitnami/spark/work/
+    - ./mnt/spark/logs/:/opt/bitnami/spark/history/
+    - ./mnt/airflow/dags:/opt/bitnami/airflow/dags
+    - ./mnt/spark/scripts/:/opt/bitnami/spark/scripts
+    - ./docker/spark/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf
+    - ./docker/spark/log4j.properties:/opt/bitnami/spark/conf/log4j.properties
+    - ./docker/hadoop-config:/opt/hadoop/etc/hadoop
+  depends_on:
+    - spark-master
+  environment:
+    - SPARK_MODE=worker
+    - SPARK_MASTER="spark://spark-master:7077"
+    - SPARK_WORKLOAD=worker
+    - SPARK_RPC_AUTHENTICATION_ENABLED=no
+    - SPARK_RPC_ENCRYPTION_ENABLED=no
+    - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+    - SPARK_SSL_ENABLED=no
+    - SPARK_USER=spark   
+  networks:
+    - etl-net
+    
+
+services:
+
+######################################################
+# DATABASE SERVICE
+######################################################
+
+  # mssql:
+  #   restart: on-failure
+  #   image: mcr.microsoft.com/mssql/server:2022-latest
+  #   container_name: mssql
+  #   networks:
+  #     etl-net:
+  #       ipv4_address: 10.5.0.100
+  #   ports:
+  #     - 1401:1433
+  #   volumes:
+  #     - ./mnt/mssql/data/:/var/opt/mssql/data
+  #     - ./mnt/mssql/log/:/var/opt/mssql/log
+  #     - ./mnt/mssql/secrets/:/var/opt/mssql/secrets
+  #     - ./mnt/mssql/backup/:/var/opt/mssql/backup
+  #   environment:
+  #     - ACCEPT_EULA=Y
+  #     - MSSQL_SA_PASSWORD=TradeAtlas*
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: on-failure
+    ports:
+      - 5401:5432
+    networks:
+      etl-net:
+        ipv4_address: 10.5.0.101
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/databases/init_postgres_database.sql:/docker-entrypoint-initdb.d/init_postgresql_database.sql
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "5"
+        max-size: "10m"
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-q", "-d", "postgres", "-U", "postgres" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    restart: on-failure
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+    networks:
+      etl-net:
+        ipv4_address: 10.5.0.102
+
+######################################################
+# MINIO SERVICE
+######################################################
+
+  minio:
+    image: docker.io/bitnami/minio:2023
+    container_name: minio
+    restart: on-failure
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=miniosecret
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    ports:
+      - 19000:9000
+      - 19001:9001
+    volumes:
+      - 'minio_data:/bitnami/minio/data'
+      - 'minio_certs:/certs'
+    networks:
+      etl-net:
+        ipv4_address: 10.5.0.103
+
+  minio-client:
+    image: docker.io/bitnami/minio-client:2023
+    user: root
+    restart: on-failure
+    container_name: minio-client
+    depends_on:
+      - minio
+    networks:
+      etl-net:
+    environment:
+      - MINIO_SERVER_HOST="minio"
+      - MINIO_SERVER_ACCESS_KEY="minio"
+      - MINIO_SERVER_SECRET_KEY="miniosecret"
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set minio http://minio:9000 minio miniosecret;
+      mc mb minio/spark-logs;
+      mc mb minio/tmp;
+      mc mb minio/airflow-logs;
+      mc mb minio/druid-logs
+      mc admin user add minio airflow airflow_secret;
+      echo 'Added user airflow.';
+      mc admin policy set minio readwrite user=airflow;
+      exit 0;
+      "
+
+######################################################
+# AIRFLOW SERVICES
+######################################################
+
+  airflow-scheduler:
+    build: ./docker/airflow/airflow-scheduler
+    container_name: airflow-scheduler
+    restart: on-failure
+    environment:
+      - AIRFLOW_FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW_SECRET_KEY=a25mQ1FHTUh3MnFRSk5KMEIyVVU2YmN0VGRyYTVXY08=
+      - AIRFLOW_DATABASE_HOST=postgres
+      - AIRFLOW_DATABASE_NAME=airflow
+      - AIRFLOW_DATABASE_USERNAME=airflow
+      - AIRFLOW_DATABASE_PASSWORD=airflow
+      - AIRFLOW_EXECUTOR=CeleryExecutor
+      - AIRFLOW_WEBSERVER_HOST=airflow
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@10.5.0.101:5432/airflow
+      - AIRFLOW__DATABASE__LOAD_DEFAULT_CONNECTIONS=False
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+      - REDIS_HOST=redis
+      - AIRFLOW__LOGGING__REMOTE_LOGGING=True
+      - AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER=s3://airflow-logs
+      - AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID=s3_conn
+      - AIRFLOW__LOGGING__ENCRYPT_S3_LOGS=False
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__SECRETS__USE_CACHE=true
+      # - AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR
+    networks:
+      - etl-net
+    volumes:
+      - ./mnt/airflow/dags:/opt/bitnami/airflow/dags
+      - ./mnt/airflow//logs:/opt/bitnami/airflow/logs
+      - ./mnt/airflow//plugins:/opt/bitnami/airflow/plugins
+      - ./docker/airflow/requirements.txt:/bitnami/python/requirements.txt
+
+    depends_on:
+      - minio
+      - postgres
+      - redis
+
+  airflow-worker:
+    build: ./docker/airflow/airflow-worker
+    container_name: airflow-worker
+    restart: on-failure
+    environment:
+      - AIRFLOW_FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW_SECRET_KEY=a25mQ1FHTUh3MnFRSk5KMEIyVVU2YmN0VGRyYTVXY08=
+      - AIRFLOW_EXECUTOR=CeleryExecutor
+      - AIRFLOW_DATABASE_HOST=postgres
+      - AIRFLOW_DATABASE_NAME=airflow
+      - AIRFLOW_DATABASE_USERNAME=airflow
+      - AIRFLOW_DATABASE_PASSWORD=airflow
+      - AIRFLOW_WEBSERVER_HOST=airflow
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@10.5.0.101:5432/airflow
+      - AIRFLOW__DATABASE__LOAD_DEFAULT_CONNECTIONS=False
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+      - REDIS_HOST=redis
+      - AIRFLOW__LOGGING__REMOTE_LOGGING=True
+      - AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER=s3://airflow-logs
+      - AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID=s3_conn
+      - AIRFLOW__LOGGING__ENCRYPT_S3_LOGS=False
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__SECRETS__USE_CACHE=true
+      # - AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR
+
+    networks:
+      - etl-net
+    volumes:
+      - ./mnt/airflow/dags:/opt/bitnami/airflow/dags
+      - ./mnt/airflow/logs:/opt/bitnami/airflow/logs
+      - ./mnt/airflow/plugins:/opt/bitnami/airflow/plugins
+      - ./docker/airflow/requirements.txt:/bitnami/python/requirements.txt
+    depends_on:
+      - minio
+      - postgres
+      - redis
+
+  airflow:
+    build: ./docker/airflow/airflow-master
+    container_name: airflow
+    restart: on-failure
+
+    environment:
+      - AIRFLOW_FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW_SECRET_KEY=a25mQ1FHTUh3MnFRSk5KMEIyVVU2YmN0VGRyYTVXY08=
+      - AIRFLOW_DATABASE_HOST=postgres
+      - AIRFLOW_DATABASE_NAME=airflow
+      - AIRFLOW_DATABASE_USERNAME=airflow
+      - AIRFLOW_DATABASE_PASSWORD=airflow
+      - AIRFLOW_PASSWORD=airflow
+      - AIRFLOW_USERNAME=airflow
+      - AIRFLOW_EMAIL=user@example.com
+      - AIRFLOW_EXECUTOR=CeleryExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@10.5.0.101:5432/airflow
+      - AIRFLOW__DATABASE__LOAD_DEFAULT_CONNECTIONS=False
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+      - REDIS_HOST=redis
+      - AIRFLOW__LOGGING__REMOTE_LOGGING=True
+      - AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER=s3://airflow-logs
+      - AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID=s3_conn
+      - AIRFLOW__LOGGING__ENCRYPT_S3_LOGS=False
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__SECRETS__USE_CACHE=true
+      # - AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR
+
+    networks:
+      - etl-net
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./mnt/airflow/dags:/opt/bitnami/airflow/dags
+      - ./mnt/airflow//logs:/opt/bitnami/airflow/logs
+      - ./mnt/airflow//plugins:/opt/bitnami/airflow/plugins
+      - ./docker/airflow/requirements.txt:/bitnami/python/requirements.txt
+    depends_on:
+      - minio
+      - postgres
+      - redis
+
+######################################################
+# SPARK SERVICE
+######################################################
+
+  spark-master:
+    build: ./docker/spark
+    container_name: spark-master
+    restart: on-failure
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+    ports:
+      - '4040:8080'
+    volumes:
+      - ./mnt/spark/work/:/opt/bitnami/spark/work/
+      - ./mnt/spark/logs/:/opt/bitnami/spark/history/
+      - ./mnt/spark/scripts/:/opt/bitnami/spark/scripts
+      - ./mnt/airflow/dags:/opt/bitnami/airflow/dags
+      - ./docker/spark/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf
+      - ./docker/spark/log4j.properties:/opt/bitnami/spark/conf/log4j.properties
+      - ./docker/hadoop-config:/opt/hadoop/etc/hadoop
+    depends_on:
+      - minio
+    networks:
+      - etl-net
+
+  spark-worker-1:
+    <<: *sparkworker-common
+    container_name: spark-worker-1
+
+  spark-worker-2:
+    <<: *sparkworker-common
+    container_name: spark-worker-2
+
+######################################################
+# DRUID SERVICE
+######################################################
+
+  zookeeper:
+    container_name: zookeeper
+    image: zookeeper:3.5.10
+    ports:
+      - "2181:2181"
+    environment:
+      - ZOO_MY_ID=1
+    networks:
+      - etl-net
+
+  coordinator:
+    image: apache/druid:29.0.1
+    container_name: coordinator
+    volumes:
+      - druid_shared:/opt/shared
+      - coordinator_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+    ports:
+      - "8081:8081"
+    command:
+      - coordinator
+    env_file:
+      - ./docker/druid/druid.env
+    networks:
+      - etl-net
+
+  broker:
+    image: apache/druid:29.0.1
+    container_name: broker
+    volumes:
+      - broker_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+      - coordinator
+    ports:
+      - "8082:8082"
+    command:
+      - broker
+    env_file:
+      - ./docker/druid/druid.env
+    networks:
+      - etl-net
+
+  historical:
+    image: apache/druid:29.0.1
+    container_name: historical
+    volumes:
+      - druid_shared:/opt/shared
+      - historical_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+      - coordinator
+    ports:
+      - "8083:8083"
+    command:
+      - historical
+    env_file:
+      - ./docker/druid/druid.env
+    networks:
+      - etl-net
+
+  middlemanager:
+    image: apache/druid:29.0.1
+    container_name: middlemanager
+    volumes:
+      - druid_shared:/opt/shared
+      - middle_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+      - coordinator
+    ports:
+      - "8091:8091"
+      - "8100-8105:8100-8105"
+    command:
+      - middleManager
+    env_file:
+      - ./docker/druid/druid.env
+    networks:
+      - etl-net
+
+  router:
+    image: apache/druid:29.0.1
+    container_name: router
+    volumes:
+      - router_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+      - coordinator
+    ports:
+      - "8888:8888"
+    command:
+      - router
+    env_file:
+      - ./docker/druid/druid.env
+    networks:
+      - etl-net
+
+
+######################################################
+# HADOOP - HIVE
+######################################################
+
+  hadoop-namenode:
+    image: apache/hadoop:3.3.6
+    container_name: hadoop-namenode
+    environment:
+      - CLUSTER_NAME=test
+      - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+
+  hadoop-datanode:
+    image: apache/hadoop:3.3.6
+    container_name: hadoop-datanode
+    environment:
+      - SERVICE_PRECONDITION=hadoop-namenode:9870
+    ports:
+      - "9864:9864"
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+
+  resourcemanager:
+    image: apache/hadoop:3.3.6
+    container_name: resourcemanager
+    environment:
+      - SERVICE_PRECONDITION=hadoop-namenode:9870
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+      - YARN_CONF_yarn_nodemanager_aux-services=spark_shuffle
+      - YARN_CONF_yarn_nodemanager_aux-services_spark_shuffle_class=org.apache.spark.network.yarn.YarnShuffleService
+    ports:
+      - "8088:8088"
+
+  nodemanager:
+    image: apache/hadoop:3.3.6
+    container_name: nodemanager
+    environment:
+      - SERVICE_PRECONDITION=resourcemanager:8088
+      - YARN_CONF_yarn_nodemanager_aux-services=spark_shuffle
+      - YARN_CONF_yarn_nodemanager_aux-services_spark_shuffle_class=org.apache.spark.network.yarn.YarnShuffleService
+
+  historyserver:
+    image: apache/hadoop:3.3.6
+    container_name: historyserver
+    environment:
+      - SERVICE_PRECONDITION=hadoop-namenode:9870
+    ports:
+      - "8188:8188"
+
+
+  hive-server:
+    image: apache/hive:4.0.0
+    container_name: hive-server
+    environment:
+      - HIVE_SITE_conf_javax_jdo_option_ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+      - HIVE_SITE_conf_javax_jdo_option_ConnectionDriverName=org.postgresql.Driver
+      - HIVE_SITE_conf_javax_jdo_option_ConnectionUserName=postgres
+      - HIVE_SITE_conf_javax_jdo_option_ConnectionPassword=example
+      - HIVE_SITE_conf_datanucleus_autoCreateSchema=true
+      - SERVICE_PRECONDITION=postgres:5432
+    depends_on:
+      - postgres
+      - hadoop-namenode
+      - resourcemanager
+
+######################################################
+# NETWORKS
+######################################################
+
+networks:
+  etl-net:
+    name: etl
+    ipam:
+      config:
+        - subnet: 10.5.0.0/16
+          gateway: "10.5.0.1"
+    driver: bridge
+
+######################################################
+# VOLUMES
+######################################################
+
+volumes:
+  minio_data:
+    driver: local
+  minio_certs:
+    driver: local
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+  metadata_data: {}
+  middle_var: {}
+  historical_var: {}
+  broker_var: {}
+  coordinator_var: {}
+  router_var: {}
+  druid_shared: {}
+  hadoop_namenode:
+  hadoop_datanode:
