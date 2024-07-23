@@ -1,4 +1,4 @@
-FROM bitnami/airflow-worker:2.9.2
+FROM bitnami/airflow-worker:2.9.3
 
 USER root
 
@@ -25,6 +25,8 @@ RUN curl -o hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoo
     curl -o delta-core_2.12-2.4.0.jar https://repo1.maven.org/maven2/io/delta/delta-core_2.12/2.4.0/delta-core_2.12-2.4.0.jar && \
     mv aws-java-sdk-bundle-1.12.604.jar hadoop-aws-3.3.4.jar postgresql-42.3.5.jar mssql-jdbc-12.4.2.jre11.jar delta-core_2.12-2.4.0.jar /opt/bitnami/spark/jars/ && \
     apt-get clean
-COPY ./jars/ /opt/bitnami/spark/jars/
+    
+COPY ../../shared/jars/ /opt/bitnami/spark/jars/
+
 
 USER 1001

@@ -13,7 +13,8 @@ RUN date
 RUN apt-get update && apt-get install -y \
     software-properties-common
 RUN mkdir -p /usr/share/man/man1
-COPY ./jars/ /opt/bitnami/spark/jars/
+
+COPY shared/jars /opt/bitnami/spark/jars/
 
 RUN curl https://packages.microsoft.com/keys/microsoft.asc | tee /etc/apt/trusted.gpg.d/microsoft.asc 
 RUN curl https://packages.microsoft.com/config/debian/11/prod.list | tee /etc/apt/sources.list.d/mssql-release.list 
