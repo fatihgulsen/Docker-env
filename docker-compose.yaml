@@ -1,4 +1,4 @@
-version: "2.2"
+version: "3.7"
 
 ######################################################
 # COMMONS
@@ -50,7 +50,7 @@ services:
   postgres:
     image: postgres:16
     container_name: postgres
-    restart: on-failure
+    restart: always
     ports:
       - 5401:5432
     networks:
@@ -68,16 +68,7 @@ services:
         max-file: "5"
         max-size: "10m"
     healthcheck:
-      test:
-        [
-          "CMD",
-          "pg_isready",
-          "-q",
-          "-d",
-          "postgres",
-          "-U",
-          "postgres"
-        ]
+      test: [ "CMD", "pg_isready", "-q", "-d", "postgres", "-U", "postgres" ]
       timeout: 45s
       interval: 10s
       retries: 10
@@ -101,7 +92,7 @@ services:
   ######################################################
 
   minio:
-    image: docker.io/bitnami/minio:latest
+    image: docker.io/bitnami/minio:2023
     container_name: minio
     restart: on-failure
     environment:
@@ -129,7 +120,7 @@ services:
         ipv4_address: 10.5.0.103
 
   minio-client:
-    image: docker.io/bitnami/minio-client:latest
+    image: docker.io/bitnami/minio-client:2023
     user: root
     restart: on-failure
     container_name: minio-client
@@ -206,113 +197,113 @@ services:
   spark-worker-2:
     <<: *sparkworker-common
     container_name: spark-worker-2
-
+  
   ######################################################
   # DRUID SERVICE
   ######################################################
 
-  # zookeeper:
-  #   container_name: zookeeper
-  #   image: zookeeper:3.5.10
-  #   ports:
-  #     - "2181:2181"
-  #   environment:
-  #     - ZOO_MY_ID=1
-  #   networks:
-  #     - etl-net
+  zookeeper:
+    container_name: zookeeper
+    image: zookeeper:3.5.10
+    ports:
+      - "2181:2181"
+    environment:
+      - ZOO_MY_ID=1
+    networks:
+      - etl-net
 
-  # coordinator:
-  #   image: apache/druid:29.0.1
-  #   container_name: coordinator
-  #   volumes:
-  #     - druid_shared:/opt/shared
-  #     - coordinator_var:/opt/druid/var
-  #   depends_on:
-  #     - zookeeper
-  #     - postgres
-  #   ports:
-  #     - "8081:8081"
-  #   command:
-  #     - coordinator
-  #   env_file:
-  #     - ./druid/config/druid.env
-  #   networks:
-  #     - etl-net
+  druid-coordinator:
+    image: apache/druid:30.0.0
+    container_name: druid-coordinator
+    volumes:
+      - druid_shared:/opt/shared
+      - coordinator_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+    ports:
+      - "8081:8081"
+    command:
+      - coordinator
+    env_file:
+      - ./druid/config/druid.env
+    networks:
+      - etl-net
 
-  # broker:
-  #   image: apache/druid:29.0.1
-  #   container_name: broker
-  #   volumes:
-  #     - broker_var:/opt/druid/var
-  #   depends_on:
-  #     - zookeeper
-  #     - postgres
-  #     - coordinator
-  #   ports:
-  #     - "8082:8082"
-  #   command:
-  #     - broker
-  #   env_file:
-  #     - ./druid/config/druid.env
-  #   networks:
-  #     - etl-net
+  druid-broker:
+    image: apache/druid:30.0.0
+    container_name: druid-broker
+    volumes:
+      - broker_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+      - druid-coordinator
+    ports:
+      - "8082:8082"
+    command:
+      - broker
+    env_file:
+      - ./druid/config/druid.env
+    networks:
+      - etl-net
 
-  # historical:
-  #   image: apache/druid:29.0.1
-  #   container_name: historical
-  #   volumes:
-  #     - druid_shared:/opt/shared
-  #     - historical_var:/opt/druid/var
-  #   depends_on:
-  #     - zookeeper
-  #     - postgres
-  #     - coordinator
-  #   ports:
-  #     - "8083:8083"
-  #   command:
-  #     - historical
-  #   env_file:
-  #     - ./druid/config/druid.env
-  #   networks:
-  #     - etl-net
+  druid-historical:
+    image: apache/druid:30.0.0
+    container_name: druid-historical
+    volumes:
+      - druid_shared:/opt/shared
+      - historical_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+      - druid-coordinator
+    ports:
+      - "8083:8083"
+    command:
+      - historical
+    env_file:
+      - ./druid/config/druid.env
+    networks:
+      - etl-net
 
-  # middlemanager:
-  #   image: apache/druid:29.0.1
-  #   container_name: middlemanager
-  #   volumes:
-  #     - druid_shared:/opt/shared
-  #     - middlemanager_var:/opt/druid/var
-  #   depends_on:
-  #     - zookeeper
-  #     - postgres
-  #     - coordinator
-  #   ports:
-  #     - "8091:8091"
-  #     - "8100-8105:8100-8105"
-  #   command:
-  #     - middleManager
-  #   env_file:
-  #     - ./druid/config/druid.env
-  #   networks:
-  #     - etl-net
+  druid-middlemanager:
+    image: apache/druid:30.0.0
+    container_name: druid-middlemanager
+    volumes:
+      - druid_shared:/opt/shared
+      - middlemanager_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+      - druid-coordinator
+    ports:
+      - "8091:8091"
+      - "8100-8105:8100-8105"
+    command:
+      - middleManager
+    env_file:
+      - ./druid/config/druid.env
+    networks:
+      - etl-net
 
-  # router:
-  #   image: apache/druid:29.0.1
-  #   container_name: router
-  #   volumes:
-  #     - router_var:/opt/druid/var
-  #   depends_on:
-  #     - zookeeper
-  #     - postgres
-  #     - coordinator
-  #   ports:
-  #     - "8888:8888"
-  #   command:
-  #     - router
-  #   env_file:
-  #     - ./druid/config/druid.env
-  #   networks:
-  #     - etl-net
+  druid-router:
+    image: apache/druid:30.0.0
+    container_name: druid-router
+    volumes:
+      - router_var:/opt/druid/var
+    depends_on:
+      - zookeeper
+      - postgres
+      - druid-coordinator
+    ports:
+      - "8888:8888"
+    command:
+      - router
+    env_file:
+      - ./druid/config/druid.env
+    networks:
+      - etl-net
 
   ######################################################
   # HADOOP SERVICES
@@ -329,8 +320,10 @@ services:
 
   # namenode:
   #   image: hadoop-base:latest
-  #   restart: on-failure
+  #   # restart: on-failure
   #   container_name: namenode
+  #   depends_on:
+  #     - hadoop-base
   #   ports:
   #     - "9870:9870"
   #   volumes:
@@ -347,10 +340,11 @@ services:
 
   # datanode:
   #   image: hadoop-base:latest
-  #   restart: on-failure
+  #   # restart: on-failure
   #   container_name: datanode
   #   depends_on:
   #     - namenode
+  #     - hadoop-base
   #   ports:
   #     - "9864:9864"
   #   volumes:
@@ -367,10 +361,11 @@ services:
 
   # resourcemanager:
   #   image: hadoop-base:latest
-  #   restart: on-failure
+  #   # restart: on-failure
   #   container_name: resourcemanager
   #   depends_on:
   #     - namenode
+  #     - hadoop-base
   #   ports:
   #     - "8088:8088"
   #   volumes:
@@ -385,13 +380,15 @@ services:
 ######################################################
 # NETWORK DEFINITION
 ######################################################
+
 networks:
   etl-net:
+    name: etl
     driver: bridge
     ipam:
-      driver: default
       config:
         - subnet: 10.5.0.0/16
+          gateway: "10.5.0.1"
 
 ######################################################
 # VOLUMES DEFINITION
